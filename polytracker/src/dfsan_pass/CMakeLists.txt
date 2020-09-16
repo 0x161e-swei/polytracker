@@ -1,14 +1,14 @@
 cmake_minimum_required(VERSION 3.5.1)
 
 list(APPEND CMAKE_PREFIX_PATH ${LLVM_7_PATH})
-find_package(LLVM 7.1 CONFIG)
+find_package(LLVM 10.0.0 CONFIG)
 
 if (LLVM_FOUND)
   message(STATUS "LLVM_VERSION_MAJOR: ${LLVM_VERSION_MAJOR}")
   message(STATUS "LLVM_VERSION_MINOR: ${LLVM_VERSION_MINOR}")
   message(STATUS "LLVM_VERSION_PATCH: ${LLVM_VERSION_PATCH}")
 else()
-	find_package(LLVM 7.0 CONFIG)
+	find_package(LLVM 10.0.0 CONFIG)
 	if (LLVM_FOUND) 
   	message(STATUS "LLVM_VERSION_MAJOR: ${LLVM_VERSION_MAJOR}")
   	message(STATUS "LLVM_VERSION_MINOR: ${LLVM_VERSION_MINOR}")
@@ -18,7 +18,7 @@ else()
 	endif()
 endif()
 
-if (NOT (LLVM_VERSION_MAJOR EQUAL 7))
+if (NOT (LLVM_VERSION_MAJOR EQUAL 10))
     message(FATAL_ERROR "You need LLVM 7 to build this (found LLVM ${LLVM_VERSION_MAJOR}). "
                         "If this is not what you expect, perhaps you need to set the LLVM_7_PATH CMake variable. "
                         "Alternatively, adjust your PATH so that LLVM 7 binaries appear first.")
@@ -35,7 +35,7 @@ if (NOT TARGET LLVMPassConfig)
     )
 endif()
 
-set (CMAKE_CXX_STANDARD 11)
+set (CMAKE_CXX_STANDARD 14)
 set (CMAKE_MODULE_LINKER_FLAGS "${CMAKE_CXX_LINK_FLAGS} -Wl,-znodelete")
 if(APPLE)
   # User teor2345 reports that this is required to make things work on MacOS X.

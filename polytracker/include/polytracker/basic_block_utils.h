@@ -14,7 +14,6 @@ using llvm::BasicBlock;
 using llvm::CallInst;
 using llvm::DominatorTree;
 using llvm::ReturnInst;
-using llvm::TerminatorInst;
 
 BasicBlockType getType(const BasicBlock *bb, const DominatorTree &dt) {
   size_t dominatedPredecessors = 0;

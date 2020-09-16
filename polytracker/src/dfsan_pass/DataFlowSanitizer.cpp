@@ -87,11 +87,13 @@
 #include "llvm/IR/Type.h"
 #include "llvm/IR/User.h"
 #include "llvm/IR/Value.h"
+#include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/SpecialCaseList.h"
+#include "llvm/Support/VirtualFileSystem.h"
 // For out of source registration
 #include "dfsan/dfsan_types.h"
 #include "polytracker/basic_block_utils.h"
@@ -99,6 +101,7 @@
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
 #include "llvm/Transforms/Instrumentation.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/Utils/Local.h"
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
@@ -254,9 +257,9 @@ struct TransformedFunction {
 /// Given function attributes from a call site for the original function,
 /// return function attributes appropriate for a call to the transformed
 /// function.
-AttributeList
-TransformFunctionAttributes(const TransformedFunction &TransformedFunction,
-                            LLVMContext &Ctx, AttributeList CallSiteAttrs) {
+AttributeList TransformFunctionAttributes(
+    const TransformedFunction &TransformedFunction,
+    LLVMContext &Ctx, AttributeList CallSiteAttrs) {
 
   // Construct a vector of AttributeSet for each function argument.
   std::vector<llvm::AttributeSet> ArgumentAttributes(
@@ -349,31 +352,31 @@ class DataFlowSanitizer : public ModulePass {
 
   // General for all taint
   FunctionType *DFSanLogTaintFnTy;
-  Constant *DFSanLogTaintFn;
+  Value *DFSanLogTaintFn;
 
   // Function to log cmps
   FunctionType *DFSanLogCmpFnTy;
-  Constant *DFSanLogCmpFn;
+  Value *DFSanLogCmpFn;
 
   FunctionType *DFSanTraceInstFnTy;
-  Constant *DFSanTraceInstFn;
+  Value *DFSanTraceInstFn;
 
   FunctionType *DFSanEntryFnTy;
   FunctionType *DFSanExitFnTy;
   FunctionType *DFSanEntryBBFnTy;
   FunctionType *DFSanResetFrameFnTy;
-  Constant *DFSanEntryFn;
-  Constant *DFSanEntryBBFn;
-  Constant *DFSanExitFn;
-  Constant *DFSanResetFrameFn;
+  Value *DFSanEntryFn;
+  Value *DFSanEntryBBFn;
+  Value *DFSanExitFn;
+  Value *DFSanResetFrameFn;
 
-  Constant *DFSanUnionFn;
-  Constant *DFSanCheckedUnionFn;
-  Constant *DFSanUnionLoadFn;
-  Constant *DFSanUnimplementedFn;
-  Constant *DFSanSetLabelFn;
-  Constant *DFSanNonzeroLabelFn;
-  Constant *DFSanVarargWrapperFn;
+  Value *DFSanUnionFn;
+  Value *DFSanCheckedUnionFn;
+  Value *DFSanUnionLoadFn;
+  Value *DFSanUnimplementedFn;
+  Value *DFSanSetLabelFn;
+  Value *DFSanNonzeroLabelFn;
+  Value *DFSanVarargWrapperFn;
   MDNode *ColdCallWeights;
   DFSanABIList ABIList;
   DenseMap<Value *, Function *> UnwrappedFnMap;
@@ -392,7 +395,7 @@ class DataFlowSanitizer : public ModulePass {
   Function *buildWrapperFunction(Function *F, StringRef NewFName,
                                  GlobalValue::LinkageTypes NewFLink,
                                  FunctionType *NewFT);
-  Constant *getOrBuildTrampolineFunction(FunctionType *FT, StringRef FName);
+  Function *getOrBuildTrampolineFunction(FunctionType *FT, StringRef FName);
 
 public:
   static char ID;
@@ -505,7 +508,9 @@ DataFlowSanitizer::DataFlowSanitizer(
   std::vector<std::string> AllABIListFiles(std::move(ABIListFiles));
   AllABIListFiles.insert(AllABIListFiles.end(), ClABIListFiles.begin(),
                          ClABIListFiles.end());
-  ABIList.set(SpecialCaseList::createOrDie(AllABIListFiles));
+  // FIXME: should we propagate vfs::FileSystem to this constructor?
+  ABIList.set(
+      SpecialCaseList::createOrDie(AllABIListFiles, *vfs::getRealFileSystem()));
 }
 
 FunctionType *DataFlowSanitizer::getArgsFunctionType(FunctionType *T) {
@@ -632,9 +637,8 @@ bool DataFlowSanitizer::doInitialization(Module &M) {
   Type *DFSanSetLabelArgs[3] = {ShadowTy, Type::getInt8PtrTy(*Ctx), IntptrTy};
   DFSanSetLabelFnTy = FunctionType::get(Type::getVoidTy(*Ctx),
                                         DFSanSetLabelArgs, /*isVarArg=*/false);
-
-  DFSanNonzeroLabelFnTy =
-      FunctionType::get(Type::getVoidTy(*Ctx), None, /*isVarArg=*/false);
+  DFSanNonzeroLabelFnTy = FunctionType::get(
+     Type::getVoidTy(*Ctx), None, /*isVarArg=*/false);
   DFSanVarargWrapperFnTy = FunctionType::get(
       Type::getVoidTy(*Ctx), Type::getInt8PtrTy(*Ctx), /*isVarArg=*/false);
 
@@ -734,11 +738,11 @@ DataFlowSanitizer::buildWrapperFunction(Function *F, StringRef NewFName,
   return NewF;
 }
 
-Constant *DataFlowSanitizer::getOrBuildTrampolineFunction(FunctionType *FT,
+Function *DataFlowSanitizer::getOrBuildTrampolineFunction(FunctionType *FT,
                                                           StringRef FName) {
   FunctionType *FTT = getTrampolineFunctionType(FT);
-  Constant *C = Mod->getOrInsertFunction(FName, FTT);
-  Function *F = dyn_cast<Function>(C);
+  auto C = Mod->getOrInsertFunction(FName, FTT);
+  Function *F = dyn_cast<Function>(C.getCallee());
   if (F && F->isDeclaration()) {
     F->setLinkage(GlobalValue::LinkOnceODRLinkage);
     BasicBlock *BB = BasicBlock::Create(*Ctx, "entry", F);
@@ -765,7 +769,7 @@ Constant *DataFlowSanitizer::getOrBuildTrampolineFunction(FunctionType *FT,
                     &*std::prev(F->arg_end()), RI);
   }
 
-  return C;
+  return dyn_cast<Function>(C.getCallee());
 }
 
 bool DataFlowSanitizer::runOnModule(Module &M) {
@@ -788,7 +792,7 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
   ExternalShadowMask =
       Mod->getOrInsertGlobal(kDFSanExternShadowPtrMask, IntptrTy);
 
-  DFSanUnionFn = Mod->getOrInsertFunction("__dfsan_union", DFSanUnionFnTy);
+  DFSanUnionFn = Mod->getOrInsertFunction("__dfsan_union", DFSanUnionFnTy).getCallee();
   if (Function *F = dyn_cast<Function>(DFSanUnionFn)) {
     F->addAttribute(AttributeList::FunctionIndex, Attribute::NoUnwind);
     F->addAttribute(AttributeList::FunctionIndex, Attribute::ReadNone);
@@ -796,7 +800,7 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
     F->addParamAttr(0, Attribute::ZExt);
     F->addParamAttr(1, Attribute::ZExt);
   }
-  DFSanCheckedUnionFn = Mod->getOrInsertFunction("dfsan_union", DFSanUnionFnTy);
+  DFSanCheckedUnionFn = Mod->getOrInsertFunction("dfsan_union", DFSanUnionFnTy).getCallee();
   if (Function *F = dyn_cast<Function>(DFSanCheckedUnionFn)) {
     F->addAttribute(AttributeList::FunctionIndex, Attribute::NoUnwind);
     F->addAttribute(AttributeList::FunctionIndex, Attribute::ReadNone);
@@ -805,35 +809,36 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
     F->addParamAttr(1, Attribute::ZExt);
   }
   DFSanUnionLoadFn =
-      Mod->getOrInsertFunction("__dfsan_union_load", DFSanUnionLoadFnTy);
+      Mod->getOrInsertFunction("__dfsan_union_load", DFSanUnionLoadFnTy).getCallee();
   if (Function *F = dyn_cast<Function>(DFSanUnionLoadFn)) {
     F->addAttribute(AttributeList::FunctionIndex, Attribute::NoUnwind);
     F->addAttribute(AttributeList::FunctionIndex, Attribute::ReadOnly);
     F->addAttribute(AttributeList::ReturnIndex, Attribute::ZExt);
   }
   DFSanUnimplementedFn =
-      Mod->getOrInsertFunction("__dfsan_unimplemented", DFSanUnimplementedFnTy);
+      Mod->getOrInsertFunction("__dfsan_unimplemented", DFSanUnimplementedFnTy).getCallee();
   DFSanSetLabelFn =
-      Mod->getOrInsertFunction("__dfsan_set_label", DFSanSetLabelFnTy);
+      Mod->getOrInsertFunction("__dfsan_set_label", DFSanSetLabelFnTy).getCallee();
   if (Function *F = dyn_cast<Function>(DFSanSetLabelFn)) {
     F->addParamAttr(0, Attribute::ZExt);
   }
   DFSanNonzeroLabelFn =
-      Mod->getOrInsertFunction("__dfsan_nonzero_label", DFSanNonzeroLabelFnTy);
+      Mod->getOrInsertFunction("__dfsan_nonzero_label", DFSanNonzeroLabelFnTy).getCallee();
   DFSanVarargWrapperFn = Mod->getOrInsertFunction("__dfsan_vararg_wrapper",
-                                                  DFSanVarargWrapperFnTy);
+                                                  DFSanVarargWrapperFnTy).getCallee();
   DFSanLogTaintFn =
-      Mod->getOrInsertFunction("__dfsan_log_taint", DFSanLogTaintFnTy);
+      Mod->getOrInsertFunction("__dfsan_log_taint", DFSanLogTaintFnTy).getCallee();
   DFSanLogCmpFn =
-      Mod->getOrInsertFunction("__dfsan_log_taint_cmp", DFSanLogCmpFnTy);
-  DFSanEntryFn = Mod->getOrInsertFunction("__dfsan_func_entry", DFSanEntryFnTy);
-  DFSanExitFn = Mod->getOrInsertFunction("__dfsan_func_exit", DFSanExitFnTy);
+      Mod->getOrInsertFunction("__dfsan_log_taint_cmp", DFSanLogCmpFnTy).getCallee();
+  DFSanEntryFn = Mod->getOrInsertFunction("__dfsan_func_entry", DFSanEntryFnTy).getCallee();
+  DFSanExitFn = Mod->getOrInsertFunction("__dfsan_func_exit", DFSanExitFnTy).getCallee();
   DFSanEntryBBFn =
-      Mod->getOrInsertFunction("__dfsan_bb_entry", DFSanEntryBBFnTy);
+      Mod->getOrInsertFunction("__dfsan_bb_entry", DFSanEntryBBFnTy).getCallee();
   DFSanResetFrameFn =
-      Mod->getOrInsertFunction("__dfsan_reset_frame", DFSanResetFrameFnTy);
+      Mod->getOrInsertFunction("__dfsan_reset_frame", DFSanResetFrameFnTy).getCallee();
   DFSanTraceInstFn =
-      Mod->getOrInsertFunction("__dfsan_trace_inst_fn", DFSanTraceInstFnTy);
+      Mod->getOrInsertFunction("__dfsan_trace_inst_fn", DFSanTraceInstFnTy).getCallee();
+
   std::vector<Function *> FnsToInstrument;
   SmallPtrSet<Function *, 2> FnsWithNativeABI;
   for (Function &i : M) {
@@ -1054,7 +1059,7 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
         Instruction *Next = Inst->getNextNode();
         // DFSanVisitor may delete Inst, so keep track of whether it was a
         // terminator.
-        bool IsTerminator = isa<TerminatorInst>(Inst);
+        bool IsTerminator = Inst->isTerminator(); // isa<TerminatorInst>(Inst);
         if (!DFSF.SkipInsts.count(Inst))
           DFSanVisitor(DFSF).visit(Inst);
         if (IsTerminator)
@@ -1104,7 +1109,7 @@ bool DataFlowSanitizer::runOnModule(Module &M) {
       }
       while (true) {
         Instruction *Next = Inst->getNextNode();
-        bool IsTerminator = isa<TerminatorInst>(Inst);
+        bool IsTerminator = Inst->isTerminator(); // isa<TerminatorInst>(Inst);
         if (CallInst *call = dyn_cast<CallInst>(Inst)) {
           if (Function *F = call->getCalledFunction()) {
             if (F->getName() == "setjmp" || F->getName() == "sigsetjump" ||
@@ -1362,11 +1367,11 @@ Value *DFSanFunction::loadShadow(Value *Addr, uint64_t Size, uint64_t Align,
     }
   }
 
-  uint64_t ShadowAlign = Align * DFS.ShadowWidth / 8;
-  SmallVector<Value *, 2> Objs;
+  llvm::Align ShadowAlign (Align * DFS.ShadowWidth / 8);
+  SmallVector<const Value *, 2> Objs;
   GetUnderlyingObjects(Addr, Objs, Pos->getModule()->getDataLayout());
   bool AllConstants = true;
-  for (Value *Obj : Objs) {
+  for (const auto Obj : Objs) {
     if (isa<Function>(Obj) || isa<BlockAddress>(Obj))
       continue;
     if (isa<GlobalVariable>(Obj) && cast<GlobalVariable>(Obj)->isConstant())
@@ -1504,7 +1509,7 @@ void DFSanFunction::storeShadow(Value *Addr, uint64_t Size, uint64_t Align,
     }
   }
 
-  uint64_t ShadowAlign = Align * DFS.ShadowWidth / 8;
+  llvm::Align ShadowAlign (Align * DFS.ShadowWidth / 8);
   IRBuilder<> IRB(Pos);
   Value *ShadowAddr = DFS.getShadowAddress(Addr, Pos);
   if (Shadow == DFS.ZeroShadow) {
@@ -1749,9 +1754,9 @@ void DFSanVisitor::visitCallSite(CallSite CS) {
         TransformedFunction CustomFn = DFSF.DFS.getCustomFunctionType(FT);
         std::string CustomFName = "__dfsw_";
         CustomFName += F->getName();
-        Constant *CustomF = DFSF.DFS.Mod->getOrInsertFunction(
+        FunctionCallee CustomF = DFSF.DFS.Mod->getOrInsertFunction(
             CustomFName, CustomFn.TransformedType);
-        if (Function *CustomFn = dyn_cast<Function>(CustomF)) {
+        if (Function *CustomFn = dyn_cast<Function>(CustomF.getCallee())) {
           CustomFn->copyAttributesFrom(F);
 
           // Custom functions returning non-void will write to the return label.
@@ -1774,8 +1779,8 @@ void DFSanVisitor::visitCallSite(CallSite CS) {
             TName += utostr(FT->getNumParams() - n);
             TName += "$";
             TName += F->getName();
-            Constant *T = DFSF.DFS.getOrBuildTrampolineFunction(ParamFT, TName);
-            Args.push_back(T);
+            FunctionCallee T = DFSF.DFS.getOrBuildTrampolineFunction(ParamFT, TName);
+            Args.push_back(T.getCallee());
             Args.push_back(
                 IRB.CreateBitCast(*i, Type::getInt8PtrTy(*DFSF.DFS.Ctx)));
           } else {

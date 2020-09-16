@@ -9,6 +9,7 @@
 
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/Support/raw_ostream.h"
 
 #include "polytracker/bb_splitting_pass.h"
 
@@ -19,7 +20,6 @@ using llvm::dyn_cast;
 using llvm::Function;
 using llvm::Instruction;
 using llvm::isa;
-using llvm::TerminatorInst;
 
 namespace polytracker {
 
